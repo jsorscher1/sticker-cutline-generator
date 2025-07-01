@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Batch Sticker Cutline SVG Generator</title>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/clipper-lib@6.4.2/clipper.js"></script>
+  <style>
+    body { font-family: sans-serif; }
+    #output svg { border: none; margin: 10px; }
+    .import-options {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 2em;
+      margin-bottom: 1.5em;
+    }
+    .import-btn, .download-link {
+      display: inline-block;
+      padding: 0.7em 1.5em;
+      font-size: 1em;
+      border: 2px solid #0078d4;
+      background: #f3f9fd;
+      color: #0078d4;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-right: 1em;
+      transition: background 0.2s, color 0.2s;
+      text-decoration: none;
+      text-align: center;
+    }
+    .import-btn:hover, .download-link:hover {
+      background: #0078d4;
+      color: #fff;
+    }
+    .import-label {
+      font-weight: bold;
+      margin-right: 0.5em;
+    }
+    .image-row {
+      display: flex;
+      align-items: center;
+      gap: 1.5em;
+      margin-bottom: 1.5em;
+    }
+    .svg-preview { margin-right: 1em; }
+    .slider-group { display: flex; align-items: center; gap: 0.5em; }
+  </style>
+</head>
+<body>
+  <h1>Sticker Cutline SVG Generator</h1>
+  <div class="import-options">
+    <div>
+      <span class="import-label">Select images (one or multiple):</span>
+      <button class="import-btn" onclick="document.getElementById('fileInputFiles').click()">Choose Images</button>
+      <input type="file" id="fileInputFiles" accept="image/*" multiple style="display:none">
+    </div>
+    <div>
+      <span class="import-label">Select a folder of images:</span>
+      <button class="import-btn" onclick="document.getElementById('fileInputFolder').click()">Choose Folder</button>
+      <input type="file" id="fileInputFolder" accept="image/*" webkitdirectory directory style="display:none">
+    </div>
+  </div>
+  <div id="output"></div>
+  <div id="combined"></div>
+  <script>
+    const INCH_PX = 96;
+    const TARGET_WIDTH = 3 * INCH_PX;
+
+    function smoothPath(points, iterations = 2) {
+      for (let iter = 0; iter < iterations; ++iter) {
+        let newPoints = [];
+        for (let i = 0; i < points.length - 1; ++i) {
+          let p0 = points[i], p1 = points[i + 1];
+          newPoints.push([
+            0.75 * p0[0] + 0.25 * p1[0],
+            0.75 * p0[1] + 0.25 * p1[1]
+          ]);
+          newPoints.push([
+            0.25 * p0[0] + 0.75 * p1[0],
+            0.25 * p0[1] + 0.75 * p1[1]
+          ]);
+        }
+        newPoints.push(newPoints[0]);
+        points = newPoints;
+      }
+      return points;
+    }
+
+    function offsetContour(points, offsetPx) {
+      if (!offsetPx) return points;
+      // Convert points to Clipper format (integers)
+      const scale = 1000; // Clipper prefers integer coordinates
+      const subj = [points.map(([x, y]) => ({ X: Math.round(x * scale), Y: Math.round(y * scale) }))];
+      const co = new ClipperLib.ClipperOffset();
+      co.AddPaths(subj, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+      let solution = new ClipperLib.Paths();
+      co.Execute(solution, offsetPx * scale);
+      if (!solution.length) return points;
+      // Use the largest offset path
+      let maxIdx = 0;
+      let maxLen = 0;
+      for (let i = 0; i < solution.length; ++i) {
+        if (solution[i].length > maxLen) {
+          maxLen = solution[i].length;
+          maxIdx = i;
+        }
+      }
+      return solution[maxIdx].map(pt => [pt.X / scale, pt.Y / scale]);
+    }
+
+    function processImage(file, callback, offsetPx=0) {
+      const img = new Image();
+      img.onload = function() {
+        const scale = TARGET_WIDTH / img.width;
+        const width = TARGET_WIDTH;
+        const height = Math.round(img.height * scale);
+        let canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        let ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        let src = cv.imread(canvas);
+        let gray = new cv.Mat();
+        let thresh = new cv.Mat();
+        if (src.channels() === 4) {
+          let rgba = new cv.Mat();
+          cv.cvtColor(src, rgba, cv.COLOR_RGBA2GRAY, 0);
+          cv.threshold(rgba, thresh, 1, 255, cv.THRESH_BINARY);
+          rgba.delete();
+        } else {
+          cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+          cv.threshold(gray, thresh, 1, 255, cv.THRESH_BINARY);
+        }
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+        if (contours.size() === 0) {
+          callback(null, null, null, file.name);
+          src.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete();
+          return;
+        }
+        let maxContour = contours.get(0);
+        let maxArea = cv.contourArea(maxContour);
+        for (let i = 1; i < contours.size(); ++i) {
+          let c = contours.get(i);
+          let area = cv.contourArea(c);
+          if (area > maxArea) {
+            maxArea = area;
+            maxContour = c;
+          }
+        }
+        let approx = new cv.Mat();
+        let peri = cv.arcLength(maxContour, true);
+        cv.approxPolyDP(maxContour, approx, 1.5, true);
+        let points = [];
+        for (let i = 0; i < approx.rows; ++i) {
+          let pt = approx.intPtr(i);
+          points.push([pt[0], pt[1]]);
+        }
+        points = smoothPath(points, 2);
+        // --- Calculate offset bounds ---
+        let offsetPoints = points;
+        if (offsetPx) offsetPoints = offsetContour(points, offsetPx);
+        // Find bounding box for offset path
+        let minX = 0, minY = 0, maxX = width, maxY = height;
+        if (offsetPoints && offsetPoints.length) {
+          minX = Math.min(...offsetPoints.map(p => p[0]), 0);
+          minY = Math.min(...offsetPoints.map(p => p[1]), 0);
+          maxX = Math.max(...offsetPoints.map(p => p[0]), width);
+          maxY = Math.max(...offsetPoints.map(p => p[1]), height);
+        }
+        // Add margin if needed
+        const margin = 10;
+        minX = Math.floor(Math.min(minX, 0)) - margin;
+        minY = Math.floor(Math.min(minY, 0)) - margin;
+        maxX = Math.ceil(Math.max(maxX, width)) + margin;
+        maxY = Math.ceil(Math.max(maxY, height)) + margin;
+        const svgW = maxX - minX;
+        const svgH = maxY - minY;
+        // Shift all points by -minX, -minY
+        let shiftedImgData = canvas.toDataURL('image/png');
+        let shiftedPoints = offsetPoints.map(([x, y]) => [x - minX, y - minY]);
+        let pathData = '';
+        for (let i = 0; i < shiftedPoints.length; ++i) {
+          let pt = shiftedPoints[i];
+          pathData += (i === 0 ? 'M' : 'L') + pt[0].toFixed(1) + ' ' + pt[1].toFixed(1) + ' ';
+        }
+        pathData += 'Z';
+        let svg = `
+          <svg width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg">
+            <image href="${shiftedImgData}" x="${-minX}" y="${-minY}" width="${width}" height="${height}"/>
+            <path d="${pathData}" fill="none" stroke="red" stroke-width="1"/>
+          </svg>
+        `;
+        callback(svg, svgW, svgH, file.name, pathData);
+        src.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); approx.delete();
+      };
+      img.src = URL.createObjectURL(file);
+    }
+
+    function handleFiles(fileList) {
+      const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+      if (!files.length) return;
+      let outputDiv = document.getElementById('output');
+      let combinedSvgs = [];
+      let processed = 0;
+      outputDiv.innerHTML = '';
+      document.getElementById('combined').innerHTML = '';
+      files.forEach((file, idx) => {
+        // Default offset is 0
+        let offsetPx = 0;
+        let container = document.createElement('div');
+        container.className = 'image-row';
+        container.innerHTML = `
+          <span class="svg-preview"></span>
+          <div>
+            <b>${file.name}</b><br>
+            <div class="slider-group">
+              <label>Cutline Offset: <input type="range" min="0" max="6" value="0" step="1"></label>
+              <a class="download-link" style="display:none">Download SVG</a>
+            </div>
+          </div>
+        `;
+        outputDiv.appendChild(container);
+        let svgSpan = container.querySelector('.svg-preview');
+        let offsetSlider = container.querySelector('input[type=range]');
+        let downloadLink = container.querySelector('a.download-link');
+        function render(offsetPx) {
+          // 8mm max, scale to px
+          let px = offsetPx * (INCH_PX / 25.4);
+          processImage(file, (svg, width, height, name, pathData) => {
+            svgSpan.innerHTML = svg;
+            downloadLink.href = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg)));
+            downloadLink.download = name.replace(/\.[^.]+$/, '') + '_cutline.svg';
+            downloadLink.style.display = '';
+            downloadLink.textContent = 'Download SVG';
+            combinedSvgs[idx] = {svg, width, height, name};
+          }, px);
+        }
+        render(0);
+        offsetSlider.addEventListener('input', function() {
+          render(Number(offsetSlider.value));
+        });
+      });
+      // Combined SVG logic
+      if (files.length > 1) {
+        let checkCombined = () => {
+          if (combinedSvgs.filter(Boolean).length === files.length) {
+            if (combinedSvgs.length) {
+              const columns = 6;
+              const maxW = Math.max(...combinedSvgs.map(s => s.width));
+              const maxH = Math.max(...combinedSvgs.map(s => s.height));
+              const rows = Math.ceil(combinedSvgs.length / columns);
+              let combinedSvg = `<svg width="${columns*maxW}" height="${rows*maxH}" xmlns="http://www.w3.org/2000/svg">`;
+              combinedSvgs.forEach((s, i) => {
+                const col = i % columns, row = Math.floor(i / columns);
+                combinedSvg += `<g transform="translate(${col*maxW},${row*maxH})">${s.svg.replace(/<svg[^>]*>|<\/svg>/gi, '')}</g>`;
+              });
+              combinedSvg += '</svg>';
+              // Styled download button next to header
+              document.getElementById('combined').innerHTML = `
+                <div style="display: flex; align-items: center; gap: 1em; margin-bottom: 1em;">
+                  <h2 style="margin: 0;">Combined SVG</h2>
+                  <a href="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(combinedSvg)))}" download="combined.svg" class="download-link">Download Combined SVG</a>
+                </div>
+                ${combinedSvg}
+              `;
+            }
+          }
+        };
+        // Attach checkCombined to each render
+        files.forEach((file, idx) => {
+          let container = outputDiv.children[idx];
+          let offsetSlider = container.querySelector('input[type=range]');
+          offsetSlider.addEventListener('input', checkCombined);
+        });
+        // Also check after initial render, and after each image is processed
+        let processedCount = 0;
+        files.forEach((file, idx) => {
+          let container = outputDiv.children[idx];
+          let svgSpan = container.querySelector('.svg-preview');
+          let observer = new MutationObserver(checkCombined);
+          observer.observe(svgSpan, { childList: true });
+        });
+        checkCombined();
+      }
+      // Fix offset range: 0-6 (about 0-8mm)
+      Array.from(outputDiv.querySelectorAll('input[type=range]')).forEach(slider => {
+        slider.max = 6;
+      });
+    }
+    function onOpenCvReady() {
+      document.getElementById('fileInputFiles').addEventListener('change', function(e) {
+        handleFiles(e.target.files);
+      });
+      document.getElementById('fileInputFolder').addEventListener('change', function(e) {
+        handleFiles(e.target.files);
+      });
+    }
+    if (typeof cv === 'undefined') {
+      window.Module = { onRuntimeInitialized: onOpenCvReady };
+    } else {
+      onOpenCvReady();
+    }
+  </script>
+</body>
+</html>
