@@ -324,30 +324,45 @@ for (let i = 0; i < contours.size(); ++i) {
         const svgW = maxX - minX;
         const svgH = maxY - minY;
         // Shift all points by -minX, -minY
-        let shiftedImgData = canvas.toDataURL('image/png');
-        let pathData = '';
-        let pathSvg = '';
-        if (shrinkwrapPaths.length) {
-          for (let k = 0; k < shrinkwrapPaths.length; ++k) {
-            let shiftedPoints = shrinkwrapPaths[k].map(([x, y]) => [x - minX, y - minY]);
-            if (shiftedPoints.length) {
-              let d = '';
-              for (let i = 0; i < shiftedPoints.length; ++i) {
-                let pt = shiftedPoints[i];
-                d += (i === 0 ? 'M' : 'L') + pt[0].toFixed(1) + ' ' + pt[1].toFixed(1) + ' ';
+        // Embed the original image as base64 in the SVG for Illustrator compatibility
+        // Use <image xlink:href=...> and both href attributes for maximum compatibility
+        let origImg = new Image();
+        origImg.onload = () => {
+          let origCanvas = document.createElement('canvas');
+          origCanvas.width = img.width;
+          origCanvas.height = img.height;
+          let origCtx = origCanvas.getContext('2d');
+          origCtx.drawImage(img, 0, 0);
+          let origImgData = origCanvas.toDataURL('image/png');
+          let pathData = '';
+          let pathSvg = '';
+          if (shrinkwrapPaths.length) {
+            for (let k = 0; k < shrinkwrapPaths.length; ++k) {
+              let shiftedPoints = shrinkwrapPaths[k].map(([x, y]) => [x - minX, y - minY]);
+              if (shiftedPoints.length) {
+                let d = '';
+                for (let i = 0; i < shiftedPoints.length; ++i) {
+                  let pt = shiftedPoints[i];
+                  d += (i === 0 ? 'M' : 'L') + pt[0].toFixed(1) + ' ' + pt[1].toFixed(1) + ' ';
+                }
+                d += 'Z';
+                pathData += d + ' ';
+                pathSvg += `<path d="${d}" fill="none" stroke="red" stroke-width="1"/>`;
               }
-              d += 'Z';
-              pathData += d + ' ';
-              pathSvg += `<path d="${d}" fill="none" stroke="red" stroke-width="1"/>`;
             }
           }
-        }
-        let svg = `
-          <svg width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg">
-            <image href="${shiftedImgData}" x="${-minX}" y="${-minY}" width="${width}" height="${height}"/>
-            ${pathSvg}
-          </svg>
-        `;
+          let svg = `
+            <svg width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+              <image xlink:href="${origImgData}" href="${origImgData}" x="${-minX}" y="${-minY}" width="${width}" height="${height}"/>
+              ${pathSvg}
+            </svg>
+          `;
+          callback(svg, svgW, svgH, file.name, pathData.trim());
+          src.delete(); gray.delete(); mask.delete(); contours.delete(); hierarchy.delete(); kernel.delete();
+          if (srcBGR) srcBGR.delete();
+        };
+        origImg.src = URL.createObjectURL(file);
+        return;
         callback(svg, svgW, svgH, file.name, pathData.trim());
         src.delete(); gray.delete(); mask.delete(); contours.delete(); hierarchy.delete(); kernel.delete();
         if (srcBGR) srcBGR.delete();
